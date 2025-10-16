@@ -1,3 +1,9 @@
+# Name: windodge.py
+# Version: 0.3
+# Author: Santarl
+# Email: rfsjay@gmail.com
+# Date: October 17, 2025
+
 import ctypes
 import time
 import sys
