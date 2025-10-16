@@ -1,5 +1,5 @@
 # Name: windodge.py
-# Version: 0.3
+# Version: 0.4
 # Author: Santarl
 # Email: rfsjay@gmail.com
 # Date: October 17, 2025
@@ -62,6 +62,9 @@ user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.IsWindow.restype = wintypes.BOOL
 user32.IsWindow.argtypes = [wintypes.HWND]
 
+user32.IsZoomed.restype = wintypes.BOOL # Added for maximized check
+user32.IsZoomed.argtypes = [wintypes.HWND]
+
 # Window Text/Class functions
 user32.GetWindowTextLengthW.restype = ctypes.c_int
 user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
@@ -117,6 +120,7 @@ ANIMATION_FPS = 60
 VALID_INTERNAL_CORNERS = [] # List of allowed internal corner indices (0, 1, 2, 3)
 NO_RESIZE = False
 NUM_WINDOWS_TO_CONTROL = 1
+SCREEN_COVERAGE_THRESHOLD = 0.90 # % of screen area for pause
 
 # Map mathematical quadrants (user input) to internal corner indices (Windows API)
 # Internal Corner Indices: 0=Top-Left, 1=Top-Right, 2=Bottom-Right, 3=Bottom-Left
@@ -197,6 +201,24 @@ def is_mouse_in_window(hwnd):
     rect = get_window_rect(hwnd)
     if not rect: return False
     return rect.left <= mouse_pos.x < rect.right and rect.top <= mouse_pos.y < rect.bottom
+
+def is_window_too_large(hwnd, screen_w, screen_h, threshold):
+    """
+    Checks if a window is maximized or covers more than the specified threshold
+    percentage of the screen area.
+    """
+    if user32.IsZoomed(hwnd):
+        return True
+    
+    rect = get_window_rect(hwnd)
+    if not rect: return False # Cannot determine size if rect is invalid
+
+    window_area = rect.width() * rect.height()
+    screen_area = screen_w * screen_h
+    
+    if screen_area == 0: return False # Avoid division by zero
+
+    return (window_area / screen_area) > threshold
 
 def get_corner_coordinates(corner_index, screen_w, screen_h, win_w, win_h, gap):
     """Calculates target (x, y) for a specific internal corner index."""
@@ -304,13 +326,10 @@ def get_safe_target_corner(current_corner_index, ideal_corner_index, all_windows
         idx = (start_idx_in_valid + i) % len(VALID_INTERNAL_CORNERS)
         ordered_corners_to_try.append(VALID_INTERNAL_CORNERS[idx])
         
-    # Remove the current corner from this list if it's the only option or already checked as ideal
-    # (it might be the first in ordered_corners_to_try if it was the initial starting point)
-    # We want to try *other* corners first if the ideal one failed
-    # But if current_corner_index is the *only* valid one and ideal failed, we return current.
-    
     for corner_to_try in ordered_corners_to_try:
-        if corner_to_try == current_corner_index and len(VALID_INTERNAL_CORNERS) > 1: # Don't try staying in same spot unless no other option
+        # If there's only one valid corner and it was already tried (and failed), we just return it.
+        # Otherwise, skip if it's the current corner and we have other options.
+        if corner_to_try == current_corner_index and len(VALID_INTERNAL_CORNERS) > 1:
             continue
 
         potential_x, potential_y = get_corner_coordinates(corner_to_try, screen_w, screen_h, win_w, win_h, gap)
@@ -371,11 +390,11 @@ def smooth_move_window(hwnd, start_x, start_y, end_x, end_y, width, height):
 
 # --- Main ---
 def main():
-    global WINDOW_SCREEN_FRACTION, CORNER_GAP_PIXELS, ANIMATION_FPS, VALID_INTERNAL_CORNERS, NO_RESIZE, NUM_WINDOWS_TO_CONTROL
+    global WINDOW_SCREEN_FRACTION, CORNER_GAP_PIXELS, ANIMATION_FPS, VALID_INTERNAL_CORNERS, NO_RESIZE, NUM_WINDOWS_TO_CONTROL, SCREEN_COVERAGE_THRESHOLD
     global g_hook_id, g_selected_hwnds
 
     parser = argparse.ArgumentParser(
-        description="A script that makes selected Windows dodge your mouse with smooth animation. Supports up to 4 windows, preventing overlap.",
+        description="A script that makes selected Windows dodge your mouse with smooth animation. Supports up to 4 windows, preventing overlap. Pauses if a window is maximized or too large.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
@@ -427,6 +446,15 @@ def main():
         choices=range(1, 5), # Limit to 1 to 4 windows
         help=f"Number of windows to control (1-4). You will click each window to select it.\nDefault: {NUM_WINDOWS_TO_CONTROL}"
     )
+    parser.add_argument(
+        '--pause-threshold',
+        type=float,
+        default=SCREEN_COVERAGE_THRESHOLD,
+        help=(
+            f"Percentage of screen area (0.0 to 1.0) a window can cover before pausing dodging.\n"
+            f"Also pauses if window is maximized. Default: {SCREEN_COVERAGE_THRESHOLD}"
+        )
+    )
 
     args = parser.parse_args()
 
@@ -436,6 +464,7 @@ def main():
     CORNER_GAP_PIXELS = args.gap
     NO_RESIZE = args.no_resize
     NUM_WINDOWS_TO_CONTROL = args.num_windows
+    SCREEN_COVERAGE_THRESHOLD = args.pause_threshold
 
     # Validate and set VALID_INTERNAL_CORNERS
     valid_math_quads = [str(i) for i in range(1, 5)]
@@ -462,6 +491,7 @@ def main():
     print(f"Animation: {ANIMATION_DURATION_SECONDS}s duration at {ANIMATION_FPS} FPS")
     if NO_RESIZE:
         print("Window resizing is DISABLED (--no-resize flag active).")
+    print(f"Dodging PAUSED if any window is maximized or covers >{SCREEN_COVERAGE_THRESHOLD*100:.0f}% of screen.")
     
     active_corners_names = [INTERNAL_CORNER_TO_MATH_QUAD_NAME[idx] for idx in VALID_INTERNAL_CORNERS]
     print(f"Active Corners: {', '.join(active_corners_names)}")
@@ -474,8 +504,6 @@ def main():
         return print("Failed to install mouse hook. Ensure you have sufficient permissions (e.g., run as administrator). Exiting.")
 
     msg = MSG()
-    # The message loop will run until PostQuitMessage(0) is called from the hook,
-    # which happens after all desired windows are selected.
     while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))
@@ -520,10 +548,12 @@ def main():
             target_w = int(scr_w * WINDOW_SCREEN_FRACTION)
             target_h = int(scr_h * WINDOW_SCREEN_FRACTION)
 
-            aspect_ratio = initial_w / initial_h
+            # Preserve aspect ratio
+            aspect_ratio = initial_w / initial_h if initial_h > 0 else 1.0
             
-            scale_by_width = target_w / initial_w
-            scale_by_height = target_h / initial_h
+            # Scale to fit within target_w and target_h while maintaining aspect ratio
+            scale_by_width = target_w / initial_w if initial_w > 0 else 1.0
+            scale_by_height = target_h / initial_h if initial_h > 0 else 1.0
             actual_scale_factor = min(scale_by_width, scale_by_height)
             
             final_win_w = int(initial_w * actual_scale_factor)
@@ -537,7 +567,6 @@ def main():
 
         if final_win_w > max_available_w or final_win_h > max_available_h:
             print("Warning: Window size with gap exceeds screen boundaries. Scaling down to fit.")
-            # Recalculate aspect ratio from potentially scaled size to be safe
             current_aspect_ratio_calc = final_win_w / final_win_h if final_win_h > 0 else 1.0 
             
             scale_by_max_w = max_available_w / final_win_w if final_win_w > 0 else 1.0
@@ -558,17 +587,19 @@ def main():
         print(f"Final window dimensions: {final_win_w}x{final_win_h} with a {CORNER_GAP_PIXELS}px gap.")
 
         # Assign initial unique corner to each window
+        # Use modulo to cycle through available corners if more windows than corners
         initial_corner_index = VALID_INTERNAL_CORNERS[i % len(VALID_INTERNAL_CORNERS)]
         initial_x, initial_y = get_corner_coordinates(initial_corner_index, scr_w, scr_h, final_win_w, final_win_h, CORNER_GAP_PIXELS)
         
-        # Check for overlap with already placed windows
+        # Check for overlap with already placed windows for initial placement
         initial_rect_for_overlap_check = RECT(initial_x, initial_y, initial_x + final_win_w, initial_y + final_win_h)
         if is_overlapping_any_other_window(initial_rect_for_overlap_check, controlled_windows, hwnd):
-            # If initial corner overlaps, try to find another free corner for initial placement
-            print(f"Initial corner {INTERNAL_CORNER_TO_MATH_QUAD_NAME[initial_corner_index]} overlaps. Finding new initial spot...")
+            print(f"Initial corner {INTERNAL_CORNER_TO_MATH_QUAD_NAME[initial_corner_index]} overlaps with another window. Finding new initial spot...")
             found_initial_spot = False
-            for try_idx in range(len(VALID_INTERNAL_CORNERS)):
-                candidate_corner = VALID_INTERNAL_CORNERS[(i + try_idx) % len(VALID_INTERNAL_CORNERS)]
+            
+            # Cycle through all VALID_INTERNAL_CORNERS to find a non-overlapping initial spot
+            for try_offset in range(len(VALID_INTERNAL_CORNERS)):
+                candidate_corner = VALID_INTERNAL_CORNERS[(i + try_offset) % len(VALID_INTERNAL_CORNERS)]
                 candidate_x, candidate_y = get_corner_coordinates(candidate_corner, scr_w, scr_h, final_win_w, final_win_h, CORNER_GAP_PIXELS)
                 candidate_rect = RECT(candidate_x, candidate_y, candidate_x + final_win_w, candidate_y + final_win_h)
                 if not is_overlapping_any_other_window(candidate_rect, controlled_windows, hwnd):
@@ -601,28 +632,49 @@ def main():
         return print("No valid windows to control. Exiting.")
 
     try:
+        paused_state = False
         while True:
-            # Clean up invalid windows
+            # Remove any controlled windows that have been closed
             controlled_windows[:] = [win for win in controlled_windows if user32.IsWindow(win['hwnd'])]
             if not controlled_windows:
                 print("All controlled windows have been closed. Exiting.")
                 break
 
+            # Check if any window is in a "too large" state
+            any_window_large = False
             for window_state in controlled_windows:
                 hwnd = window_state['hwnd']
-                # Reaffirm always-on-top status periodically
+                # Always re-affirm always-on-top for all windows, even if paused
                 user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
 
+                if is_window_too_large(hwnd, scr_w, scr_h, SCREEN_COVERAGE_THRESHOLD):
+                    any_window_large = True
+            
+            if any_window_large:
+                if not paused_state:
+                    print("\n--- Script Paused: A controlled window is maximized or covers >90% of screen. ---")
+                    paused_state = True
+                time.sleep(0.5) # Longer sleep during pause when paused
+                continue # Skip dodging logic
+            
+            # If not paused, or just resumed
+            if paused_state:
+                print("--- Script Resumed: All controlled windows are now within normal bounds. ---")
+                paused_state = False
+
+            # --- Normal Dodging Logic (only executed if not paused) ---
+            for window_state in controlled_windows:
+                hwnd = window_state['hwnd']
                 mouse_pos = POINT()
                 user32.GetCursorPos(ctypes.byref(mouse_pos))
 
                 if is_mouse_in_window(hwnd):
-                    print(f"Mouse entered window {hwnd}! Dodging directionally...")
+                    # print(f"Mouse entered window {hwnd}! Dodging directionally...")
                     
                     current_rect = get_window_rect(hwnd)
                     if not current_rect:
                         print(f"Could not get window rectangle for {hwnd}, assuming it's closing.")
-                        continue # This window will be removed in the next cleanup
+                        continue 
 
                     window_state['current_rect'] = current_rect # Update rect in state
 
