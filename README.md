@@ -5,7 +5,9 @@ pip mode for windows where the window dodges the mouse so you can interact with 
 ```
 uv run https://raw.githubusercontent.com/santarl/windodge.py/refs/heads/main/windodge.py
 ```
-or clone, install requirements and run.
+or clone, run_windodgepy.bat.
+
+you can also use the shortcut to run it without a console window.
 
 # screenshots
 study session:
