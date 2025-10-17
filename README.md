@@ -23,10 +23,12 @@ git clone https://github.com/santarl/windodge.py
 cd windodge.py
 mv windodgepy.ink ~/Desktop/
 ```
-Move the included shortcut windodgepy.lnk to desktop [(for the hotkey to work)](https://superuser.com/questions/1046261/windows-10-shortcut-keys-only-work-when-shortcut-is-on-desktop)
+Move the included shortcut windodgepy.lnk to desktop [(for the hotkey to work)](https://superuser.com/questions/1046261/windows-10-shortcut-keys-only-work-when-shortcut-is-on-desktop)    
 Press Ctrl + Alt + D to run.    
 Alternatively, search for windodgepy in the Start Menu and pin it to the Start or Taskbar for easy access.    
-The script auto terminates on closing the floating window(s) or can be manually closed by closing the conhost.exe from the taskbar (ez middle click)    
+
+The script auto terminates on closing the floating window(s)     
+or can be manually closed by closing the conhost.exe from the taskbar (ez middle click)    
 
 # flags
 
