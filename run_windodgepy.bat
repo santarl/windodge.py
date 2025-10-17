@@ -1,1 +1,1 @@
-uv run ./windodge.py
+uv run ./windodge.py -N
