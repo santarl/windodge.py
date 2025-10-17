@@ -7,7 +7,7 @@ uv run https://raw.githubusercontent.com/santarl/windodge.py/refs/heads/main/win
 ```
 or clone, run_windodgepy.bat.
 
-you can also use the shortcut to run it without a console window.
+you can also use the shortcut to run it with a minimized console window or use the hotkey ctrl+alt+d after copying the shortcut to desktop
 
 # screenshots
 study session:
