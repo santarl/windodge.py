@@ -1,5 +1,5 @@
 # Name: windodge.py
-# Version: 0.6
+# Version: 0.7
 # Author: Santarl
 # Email: rfsjay@gmail.com
 # Date: October 17, 2025
@@ -71,6 +71,9 @@ user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 
 user32.IsWindow.restype = wintypes.BOOL
 user32.IsWindow.argtypes = [wintypes.HWND]
+
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetForegroundWindow.argtypes = []
 
 user32.IsZoomed.restype = wintypes.BOOL
 user32.IsZoomed.argtypes = [wintypes.HWND]
@@ -720,7 +723,8 @@ def main():
             'current_visual_rect': current_visual_rect_after_move,
             'vis_w': final_vis_w,
             'vis_h': final_vis_h,
-            'frame_paddings': frame_paddings # Store paddings for future moves
+            'frame_paddings': frame_paddings, # Store paddings for future moves
+            'is_focused': True # Just placed and set always-on-top above; corrected on next tick
         })
         print(f"Window {i+1} initialized at {INTERNAL_CORNER_TO_MATH_QUAD_NAME[initial_corner_index]} and set to always on top.")
 
@@ -743,12 +747,22 @@ def main():
                 print("All controlled windows have been closed. Exiting.")
                 break
 
+            # Determine which controlled window (if any) currently has focus.
+            # Only that window should be forced topmost; others fall back to normal z-order
+            # so alt-tabbing / clicking away doesn't leave them pinned above everything.
+            foreground_hwnd = user32.GetForegroundWindow()
+            foreground_root = user32.GetAncestor(foreground_hwnd, GA_ROOT) if foreground_hwnd else None
+
             # Check if any window is in a "too large" state
             any_window_large = False
             for window_state in controlled_windows:
                 hwnd = window_state['hwnd']
-                # Always re-affirm always-on-top for all windows, even if paused
-                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
+                is_focused = (hwnd == foreground_root)
+                window_state['is_focused'] = is_focused
+                if is_focused:
+                    user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
+                else:
+                    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
 
                 if is_window_too_large(hwnd, full_screen_w, full_screen_h, SCREEN_COVERAGE_THRESHOLD):
                     any_window_large = True
@@ -801,7 +815,7 @@ def main():
 
                         target_vis_x, target_vis_y = get_target_visual_coordinates(target_corner_index, full_screen_w, full_screen_h, window_state['vis_w'], window_state['vis_h'], CORNER_GAP_PIXELS)
                         
-                        move_window(hwnd, target_vis_x, target_vis_y, window_state['vis_w'], window_state['vis_h'], window_state['frame_paddings'], animate=True, always_on_top=True)
+                        move_window(hwnd, target_vis_x, target_vis_y, window_state['vis_w'], window_state['vis_h'], window_state['frame_paddings'], animate=True, always_on_top=window_state['is_focused'])
                         
                         # Update the window's visual rect after smooth move
                         window_state['current_visual_rect'] = get_window_visual_rect(hwnd) 
