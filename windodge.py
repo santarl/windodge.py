@@ -5,7 +5,7 @@ out of the cursor's way, preventing overlap, pausing when a window is
 maximized or covers most of the screen.
 """
 
-__version__ = "0.8"
+__version__ = "0.9"
 __author__ = "Santarl"
 __email__ = "rfsjay@gmail.com"
 __date__ = "October 17, 2025"  # original creation date, not last-modified
@@ -81,6 +81,9 @@ user32.IsWindow.argtypes = [wintypes.HWND]
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetForegroundWindow.argtypes = []
 
+user32.SystemParametersInfoW.restype = wintypes.BOOL
+user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+
 user32.IsZoomed.restype = wintypes.BOOL
 user32.IsZoomed.argtypes = [wintypes.HWND]
 
@@ -134,6 +137,8 @@ SWP_ASYNCWINDOWPOS = 0x4000
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
+
+SPI_GETWORKAREA = 0x0030
 
 WH_MOUSE_LL = 14
 WM_LBUTTONDOWN = 0x0201
@@ -204,6 +209,20 @@ def mouse_hook_proc(nCode, wParam, lParam):
 def get_full_screen_dimensions():
     """Returns the (width, height) of the primary monitor's full screen area."""
     return user32.GetSystemMetrics(SM_CXSCREEN), user32.GetSystemMetrics(SM_CYSCREEN)
+
+def get_work_area():
+    """
+    Returns (x, y, width, height) of the primary monitor's usable work area,
+    i.e. the full screen minus the taskbar (and any other docked appbars).
+    Works regardless of which edge the taskbar is docked to (top/bottom/left/right);
+    Windows computes the exclusion itself. Falls back to the full screen if the
+    call fails for some reason.
+    """
+    rect = RECT()
+    if user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+        return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    w, h = get_full_screen_dimensions()
+    return 0, 0, w, h
 
 def get_window_rect(hwnd, retries=5, delay=0.01):
     """
@@ -297,10 +316,12 @@ def is_window_too_large(hwnd, screen_w, screen_h, threshold):
 
     return (window_area / screen_area) > threshold
 
-def get_target_visual_coordinates(corner_index, screen_w, screen_h, vis_w, vis_h, gap):
+def get_target_visual_coordinates(corner_index, screen_w, screen_h, vis_w, vis_h, gap, origin_x=0, origin_y=0):
     """
     Calculates target (x, y) for the VISUAL part of the window,
-    relative to the full screen (0,0), applying the specified gap.
+    relative to (origin_x, origin_y) - the top-left of the usable area -
+    applying the specified gap. origin_x/origin_y are non-zero when the
+    taskbar is docked to the top or left edge, shifting the usable area's origin.
     """
     x, y = 0, 0
     
@@ -319,7 +340,7 @@ def get_target_visual_coordinates(corner_index, screen_w, screen_h, vis_w, vis_h
     else: # Fallback (shouldn't happen)
         x, y = 0, 0
 
-    return x, y
+    return origin_x + x, origin_y + y
 
 def do_rects_overlap(rect1, rect2, tolerance=0):
     """Checks if two RECT objects overlap, with an optional tolerance."""
@@ -377,7 +398,7 @@ def get_ideal_directional_corner(current_corner_index, mouse_x, mouse_y, visual_
             
     return itc
 
-def get_safe_target_corner(current_corner_index, ideal_corner_index, all_windows_states, current_window_hwnd, screen_w, screen_h, vis_w, vis_h, gap):
+def get_safe_target_corner(current_corner_index, ideal_corner_index, all_windows_states, current_window_hwnd, screen_w, screen_h, vis_w, vis_h, gap, origin_x=0, origin_y=0):
     """
     Finds a safe (non-overlapping and allowed) target corner, prioritizing ideal_corner_index.
     If ideal is not safe/allowed, it cycles through other allowed corners.
@@ -385,7 +406,7 @@ def get_safe_target_corner(current_corner_index, ideal_corner_index, all_windows
     
     # Try the ideal corner first if it's allowed
     if ideal_corner_index in VALID_INTERNAL_CORNERS:
-        potential_x, potential_y = get_target_visual_coordinates(ideal_corner_index, screen_w, screen_h, vis_w, vis_h, gap)
+        potential_x, potential_y = get_target_visual_coordinates(ideal_corner_index, screen_w, screen_h, vis_w, vis_h, gap, origin_x, origin_y)
         potential_rect = RECT(potential_x, potential_y, potential_x + vis_w, potential_y + vis_h)
         if not is_overlapping_any_other_window(potential_rect, all_windows_states, current_window_hwnd):
             return ideal_corner_index # Ideal corner is safe and allowed!
@@ -406,7 +427,7 @@ def get_safe_target_corner(current_corner_index, ideal_corner_index, all_windows
         if corner_to_try == current_corner_index and len(VALID_INTERNAL_CORNERS) > 1:
             continue
 
-        potential_x, potential_y = get_target_visual_coordinates(corner_to_try, screen_w, screen_h, vis_w, vis_h, gap)
+        potential_x, potential_y = get_target_visual_coordinates(corner_to_try, screen_w, screen_h, vis_w, vis_h, gap, origin_x, origin_y)
         potential_rect = RECT(potential_x, potential_y, potential_x + vis_w, potential_y + vis_h)
         if not is_overlapping_any_other_window(potential_rect, all_windows_states, current_window_hwnd):
             return corner_to_try # Found a safe and allowed corner
@@ -613,8 +634,8 @@ def main():
     if len(g_selected_hwnds) < NUM_WINDOWS_TO_CONTROL:
         return print(f"Only {len(g_selected_hwnds)}/{NUM_WINDOWS_TO_CONTROL} windows selected. Exiting.")
 
-    full_screen_w, full_screen_h = get_full_screen_dimensions()
-    print(f"Detected full screen dimensions: {full_screen_w}x{full_screen_h} (Windows may apply display scaling)")
+    work_area_x, work_area_y, full_screen_w, full_screen_h = get_work_area()
+    print(f"Detected usable work area: {full_screen_w}x{full_screen_h} at ({work_area_x},{work_area_y}) - taskbar excluded (Windows may apply display scaling)")
 
     controlled_windows = [] # List to hold state for each controlled window
 
@@ -695,7 +716,7 @@ def main():
 
         # Assign initial unique corner to each window
         initial_corner_index = VALID_INTERNAL_CORNERS[i % len(VALID_INTERNAL_CORNERS)]
-        target_vis_x, target_vis_y = get_target_visual_coordinates(initial_corner_index, full_screen_w, full_screen_h, final_vis_w, final_vis_h, CORNER_GAP_PIXELS)
+        target_vis_x, target_vis_y = get_target_visual_coordinates(initial_corner_index, full_screen_w, full_screen_h, final_vis_w, final_vis_h, CORNER_GAP_PIXELS, work_area_x, work_area_y)
         
         # Check for overlap with already placed windows for initial placement
         potential_initial_visual_rect = RECT(target_vis_x, target_vis_y, target_vis_x + final_vis_w, target_vis_y + final_vis_h)
@@ -705,7 +726,7 @@ def main():
             
             for try_offset in range(len(VALID_INTERNAL_CORNERS)):
                 candidate_corner = VALID_INTERNAL_CORNERS[(i + try_offset) % len(VALID_INTERNAL_CORNERS)]
-                candidate_vis_x, candidate_vis_y = get_target_visual_coordinates(candidate_corner, full_screen_w, full_screen_h, final_vis_w, final_vis_h, CORNER_GAP_PIXELS)
+                candidate_vis_x, candidate_vis_y = get_target_visual_coordinates(candidate_corner, full_screen_w, full_screen_h, final_vis_w, final_vis_h, CORNER_GAP_PIXELS, work_area_x, work_area_y)
                 candidate_visual_rect = RECT(candidate_vis_x, candidate_vis_y, candidate_vis_x + final_vis_w, candidate_vis_y + final_vis_h)
                 if not is_overlapping_any_other_window(candidate_visual_rect, controlled_windows, hwnd):
                     initial_corner_index = candidate_corner
@@ -814,14 +835,15 @@ def main():
                         full_screen_w, full_screen_h,
                         window_state['vis_w'],
                         window_state['vis_h'],
-                        CORNER_GAP_PIXELS
+                        CORNER_GAP_PIXELS,
+                        work_area_x, work_area_y
                     )
                     
                     if target_corner_index != window_state['corner']:
                         print(f"Window {hwnd} moving from {INTERNAL_CORNER_TO_MATH_QUAD_NAME[window_state['corner']]} to {INTERNAL_CORNER_TO_MATH_QUAD_NAME[target_corner_index]}.")
                         window_state['corner'] = target_corner_index
 
-                        target_vis_x, target_vis_y = get_target_visual_coordinates(target_corner_index, full_screen_w, full_screen_h, window_state['vis_w'], window_state['vis_h'], CORNER_GAP_PIXELS)
+                        target_vis_x, target_vis_y = get_target_visual_coordinates(target_corner_index, full_screen_w, full_screen_h, window_state['vis_w'], window_state['vis_h'], CORNER_GAP_PIXELS, work_area_x, work_area_y)
                         
                         move_window(hwnd, target_vis_x, target_vis_y, window_state['vis_w'], window_state['vis_h'], window_state['frame_paddings'], animate=True, always_on_top=window_state['is_focused'])
                         
