@@ -1,8 +1,14 @@
-# Name: windodge.py
-# Version: 0.7
-# Author: Santarl
-# Email: rfsjay@gmail.com
-# Date: October 17, 2025
+"""windodge.py: Makes selected windows dodge your mouse with smooth animation.
+
+Keeps up to 4 chosen windows always-on-top (only while focused) and moves them
+out of the cursor's way, preventing overlap, pausing when a window is
+maximized or covers most of the screen.
+"""
+
+__version__ = "0.8"
+__author__ = "Santarl"
+__email__ = "rfsjay@gmail.com"
+__date__ = "October 17, 2025"  # original creation date, not last-modified
 
 import ctypes
 import time
@@ -469,6 +475,8 @@ def move_window(hwnd, target_vis_x, target_vis_y, target_vis_w, target_vis_h, fr
 
 # --- Main ---
 def main():
+    print(f"windodge.py v{__version__} - {__author__}")
+
     global WINDOW_SCREEN_FRACTION, CORNER_GAP_PIXELS, ANIMATION_FPS, VALID_INTERNAL_CORNERS, NO_RESIZE, NUM_WINDOWS_TO_CONTROL, SCREEN_COVERAGE_THRESHOLD
     global g_hook_id, g_selected_hwnds, G_DWM_AVAILABLE
 
