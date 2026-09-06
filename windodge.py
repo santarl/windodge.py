@@ -5,7 +5,7 @@ out of the cursor's way, preventing overlap, pausing when a window is
 maximized or covers most of the screen.
 """
 
-__version__ = "0.9"
+__version__ = "0.91"
 __author__ = "Santarl"
 __email__ = "rfsjay@gmail.com"
 __date__ = "October 17, 2025"  # original creation date, not last-modified
@@ -84,6 +84,12 @@ user32.GetForegroundWindow.argtypes = []
 user32.SystemParametersInfoW.restype = wintypes.BOOL
 user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
 
+user32.PostMessageW.restype = wintypes.BOOL
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+
+user32.MapVirtualKeyW.restype = wintypes.UINT
+user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+
 user32.IsZoomed.restype = wintypes.BOOL
 user32.IsZoomed.argtypes = [wintypes.HWND]
 
@@ -147,6 +153,10 @@ GA_ROOT = 2
 
 SW_MINIMIZE = 6
 
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+MAPVK_VK_TO_VSC = 0
+
 # --- GLOBAL CONFIGURATION VARIABLES (will be set by argparse) ---
 WINDOW_SCREEN_FRACTION = 0.25
 CORNER_GAP_PIXELS = 20
@@ -156,6 +166,13 @@ VALID_INTERNAL_CORNERS = []
 NO_RESIZE = False
 NUM_WINDOWS_TO_CONTROL = 1
 SCREEN_COVERAGE_THRESHOLD = 0.90
+TOGGLE_KEY = "F" # Key sent to the focused controlled window on the edge gesture; "" disables the feature
+
+# Edge-gesture zone: a thin strip at the physical right edge of the screen,
+# centered vertically, used to trigger TOGGLE_KEY while a controlled window is focused.
+EDGE_GESTURE_ZONE_THICKNESS_PIXELS = 10
+EDGE_GESTURE_ZONE_HEIGHT_FRACTION = 0.30 # 30% of screen height, centered (15% above/below midpoint)
+EDGE_GESTURE_DWELL_SECONDS = 0.35
 
 # Map mathematical quadrants (user input) to internal corner indices (Windows API)
 # Internal Corner Indices: 0=Top-Left, 1=Top-Right, 2=Bottom-Right, 3=Bottom-Left
@@ -223,6 +240,33 @@ def get_work_area():
         return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
     w, h = get_full_screen_dimensions()
     return 0, 0, w, h
+
+def is_mouse_in_edge_gesture_zone(mouse_x, mouse_y, raw_screen_w, raw_screen_h):
+    """
+    True if (mouse_x, mouse_y) is within the thin strip at the physical right edge
+    of the screen, vertically centered with height EDGE_GESTURE_ZONE_HEIGHT_FRACTION.
+    Uses the raw screen edge (not the work area) since the gesture should trigger
+    regardless of taskbar position.
+    """
+    if mouse_x < raw_screen_w - EDGE_GESTURE_ZONE_THICKNESS_PIXELS:
+        return False
+    band_half_height = (raw_screen_h * EDGE_GESTURE_ZONE_HEIGHT_FRACTION) / 2
+    mid_y = raw_screen_h / 2
+    return (mid_y - band_half_height) <= mouse_y <= (mid_y + band_half_height)
+
+def send_key_to_window(hwnd, key_char):
+    """
+    Posts a synthetic WM_KEYDOWN/WM_KEYUP for key_char directly to hwnd's message
+    queue, without stealing focus (no SetForegroundWindow / SendInput involved).
+    Works for apps that handle shortcuts through their normal window proc (e.g. mpv);
+    apps that read raw/DirectInput instead of window messages won't see this.
+    """
+    vk_code = ord(key_char.upper())
+    scan_code = user32.MapVirtualKeyW(vk_code, MAPVK_VK_TO_VSC)
+    lparam_down = 1 | (scan_code << 16)
+    lparam_up = 1 | (scan_code << 16) | (1 << 30) | (1 << 31)
+    user32.PostMessageW(hwnd, WM_KEYDOWN, vk_code, lparam_down)
+    user32.PostMessageW(hwnd, WM_KEYUP, vk_code, lparam_up)
 
 def get_window_rect(hwnd, retries=5, delay=0.01):
     """
@@ -498,7 +542,7 @@ def move_window(hwnd, target_vis_x, target_vis_y, target_vis_w, target_vis_h, fr
 def main():
     print(f"windodge.py v{__version__} - {__author__}")
 
-    global WINDOW_SCREEN_FRACTION, CORNER_GAP_PIXELS, ANIMATION_FPS, VALID_INTERNAL_CORNERS, NO_RESIZE, NUM_WINDOWS_TO_CONTROL, SCREEN_COVERAGE_THRESHOLD
+    global WINDOW_SCREEN_FRACTION, CORNER_GAP_PIXELS, ANIMATION_FPS, VALID_INTERNAL_CORNERS, NO_RESIZE, NUM_WINDOWS_TO_CONTROL, SCREEN_COVERAGE_THRESHOLD, TOGGLE_KEY
     global g_hook_id, g_selected_hwnds, G_DWM_AVAILABLE
 
     parser = argparse.ArgumentParser(
@@ -563,8 +607,22 @@ def main():
             f"Also pauses if window is maximized. Default: {SCREEN_COVERAGE_THRESHOLD}"
         )
     )
+    parser.add_argument(
+        '--toggle-key',
+        type=str,
+        default=TOGGLE_KEY,
+        help=(
+            "Single letter/digit key sent to a controlled window (while it's focused) when the mouse "
+            "dwells in a zone at the vertical-center of the right screen edge - e.g. mpv's 'f' fullscreen "
+            "toggle. Pass an empty string to disable this feature. "
+            f"Default: '{TOGGLE_KEY}'"
+        )
+    )
 
     args = parser.parse_args()
+
+    if args.toggle_key != "" and (len(args.toggle_key) != 1 or not args.toggle_key.isalnum()):
+        parser.error("--toggle-key must be a single letter/digit, or an empty string to disable the feature.")
 
     # Apply arguments to global configuration
     WINDOW_SCREEN_FRACTION = args.size
@@ -573,6 +631,7 @@ def main():
     NO_RESIZE = args.no_resize
     NUM_WINDOWS_TO_CONTROL = args.num_windows
     SCREEN_COVERAGE_THRESHOLD = args.pause_threshold
+    TOGGLE_KEY = args.toggle_key
 
     # Initial check for DWM functionality
     try:
@@ -613,6 +672,10 @@ def main():
     if NO_RESIZE:
         print("Window resizing is DISABLED (--no-resize flag active).")
     print(f"Dodging PAUSED if any window is maximized or covers >{SCREEN_COVERAGE_THRESHOLD*100:.0f}% of screen.")
+    if TOGGLE_KEY:
+        print(f"Right-edge dwell gesture: sends '{TOGGLE_KEY}' to the focused controlled window.")
+    else:
+        print("Right-edge dwell gesture: disabled (--toggle-key is empty).")
     
     active_corners_names = [INTERNAL_CORNER_TO_MATH_QUAD_NAME[idx] for idx in VALID_INTERNAL_CORNERS]
     print(f"Active Corners: {', '.join(active_corners_names)}")
@@ -634,6 +697,7 @@ def main():
     if len(g_selected_hwnds) < NUM_WINDOWS_TO_CONTROL:
         return print(f"Only {len(g_selected_hwnds)}/{NUM_WINDOWS_TO_CONTROL} windows selected. Exiting.")
 
+    raw_screen_w, raw_screen_h = get_full_screen_dimensions()
     work_area_x, work_area_y, full_screen_w, full_screen_h = get_work_area()
     print(f"Detected usable work area: {full_screen_w}x{full_screen_h} at ({work_area_x},{work_area_y}) - taskbar excluded (Windows may apply display scaling)")
 
@@ -752,8 +816,7 @@ def main():
             'current_visual_rect': current_visual_rect_after_move,
             'vis_w': final_vis_w,
             'vis_h': final_vis_h,
-            'frame_paddings': frame_paddings, # Store paddings for future moves
-            'is_focused': True # Just placed and set always-on-top above; corrected on next tick
+            'frame_paddings': frame_paddings # Store paddings for future moves
         })
         print(f"Window {i+1} initialized at {INTERNAL_CORNER_TO_MATH_QUAD_NAME[initial_corner_index]} and set to always on top.")
 
@@ -769,6 +832,7 @@ def main():
 
     try:
         paused_state = False
+        edge_gesture_state = {'entered_at': None, 'triggered': False}
         while True:
             # Remove any controlled windows that have been closed
             controlled_windows[:] = [win for win in controlled_windows if user32.IsWindow(win['hwnd'])]
@@ -777,21 +841,39 @@ def main():
                 break
 
             # Determine which controlled window (if any) currently has focus.
-            # Only that window should be forced topmost; others fall back to normal z-order
-            # so alt-tabbing / clicking away doesn't leave them pinned above everything.
+            # Not used for topmost anymore (that broke visibility while dodging -
+            # see commit history); kept solely to gate the right-edge dwell gesture below.
             foreground_hwnd = user32.GetForegroundWindow()
             foreground_root = user32.GetAncestor(foreground_hwnd, GA_ROOT) if foreground_hwnd else None
+            focused_window_state = next((w for w in controlled_windows if w['hwnd'] == foreground_root), None)
+
+            # Right-edge dwell gesture: send TOGGLE_KEY to the focused controlled window
+            # (e.g. mpv's 'f') when the mouse dwells in the zone. Stateless on our end -
+            # we don't track fullscreen/dodging ourselves, the app's own toggle handles it,
+            # so this also correctly "counts" the app fullscreening itself via other means.
+            if TOGGLE_KEY and focused_window_state:
+                gesture_mouse_pos = POINT()
+                user32.GetCursorPos(ctypes.byref(gesture_mouse_pos))
+                if is_mouse_in_edge_gesture_zone(gesture_mouse_pos.x, gesture_mouse_pos.y, raw_screen_w, raw_screen_h):
+                    if edge_gesture_state['entered_at'] is None:
+                        edge_gesture_state['entered_at'] = time.perf_counter()
+                        edge_gesture_state['triggered'] = False
+                    elif not edge_gesture_state['triggered'] and (time.perf_counter() - edge_gesture_state['entered_at']) >= EDGE_GESTURE_DWELL_SECONDS:
+                        send_key_to_window(focused_window_state['hwnd'], TOGGLE_KEY)
+                        edge_gesture_state['triggered'] = True
+                else:
+                    edge_gesture_state['entered_at'] = None
+                    edge_gesture_state['triggered'] = False
+            else:
+                edge_gesture_state['entered_at'] = None
+                edge_gesture_state['triggered'] = False
 
             # Check if any window is in a "too large" state
             any_window_large = False
             for window_state in controlled_windows:
                 hwnd = window_state['hwnd']
-                is_focused = (hwnd == foreground_root)
-                window_state['is_focused'] = is_focused
-                if is_focused:
-                    user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
-                else:
-                    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
+                # Always re-affirm always-on-top for all windows, even if paused
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)
 
                 if is_window_too_large(hwnd, full_screen_w, full_screen_h, SCREEN_COVERAGE_THRESHOLD):
                     any_window_large = True
@@ -845,7 +927,7 @@ def main():
 
                         target_vis_x, target_vis_y = get_target_visual_coordinates(target_corner_index, full_screen_w, full_screen_h, window_state['vis_w'], window_state['vis_h'], CORNER_GAP_PIXELS, work_area_x, work_area_y)
                         
-                        move_window(hwnd, target_vis_x, target_vis_y, window_state['vis_w'], window_state['vis_h'], window_state['frame_paddings'], animate=True, always_on_top=window_state['is_focused'])
+                        move_window(hwnd, target_vis_x, target_vis_y, window_state['vis_w'], window_state['vis_h'], window_state['frame_paddings'], animate=True, always_on_top=True)
                         
                         # Update the window's visual rect after smooth move
                         window_state['current_visual_rect'] = get_window_visual_rect(hwnd) 
